@@ -163,7 +163,7 @@ def chart_style() -> dict:
 def make_chart(df: pd.DataFrame, code: str, name: str, output_dir: Path, filename: str, label: str, trading_days: int) -> str:
     chart_df = df.tail(trading_days).copy()
     addplots = []
-    ma_styles = [("MA5", "#e4572e", "MA5 短期"), ("MA25", "#2e86ab", "MA25 中期"), ("MA75", "#4f772d", "MA75 長期")]
+    ma_styles = [("MA5", "#e4572e", "MA5"), ("MA25", "#2e86ab", "MA25"), ("MA75", "#4f772d", "MA75")]
     legend_handles = []
     for column, color, label_name in ma_styles:
         if column in chart_df and chart_df[column].notna().any():
