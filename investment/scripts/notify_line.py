@@ -43,7 +43,13 @@ def main() -> None:
     parser.add_argument("--run-url", default="")
     args = parser.parse_args()
 
-    message = f"投資ダッシュボード更新: {args.status}"
+    status_label = {
+        "success": "GitHub Pages更新完了",
+        "failure": "更新失敗",
+        "cancelled": "更新キャンセル",
+        "skipped": "更新スキップ",
+    }.get(args.status, args.status)
+    message = f"投資ダッシュボード: {status_label}"
     if args.url:
         message += f"\n{args.url}"
     if args.run_url:
