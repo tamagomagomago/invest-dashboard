@@ -19,6 +19,8 @@ class ScoreResult:
     volume_score: int
     rsi_score: int
     reversal_score: int
+    wave_score: int
+    wave_label: str
     risk_penalty: int
     reversal_label: str
     comments: list[str]
@@ -46,6 +48,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["High20"] = out["High"].rolling(20, min_periods=5).max()
     out["PrevHigh20"] = out["High"].shift(1).rolling(20, min_periods=5).max()
     out["DrawdownFrom52wHigh"] = out["Close"] / out["High52w"].replace(0, np.nan) - 1
+    out["Return1d"] = out["Close"].pct_change(1)
     out["Return5d"] = out["Close"].pct_change(5)
     out["Return10d"] = out["Close"].pct_change(10)
     return out
@@ -399,6 +402,113 @@ def score_risk(df: pd.DataFrame) -> tuple[int, list[str]]:
     return max(penalty, -25), reasons
 
 
+def score_early_wave(df: pd.DataFrame) -> tuple[int, str, list[str]]:
+    """Heuristic for a Wave-3-like early advance after a constructive pullback."""
+    latest = df.iloc[-1]
+    recent60 = df.tail(60)
+    recent30 = df.tail(30)
+    recent15 = df.tail(15)
+    recent10 = df.tail(10)
+
+    score = 0
+    reasons: list[str] = []
+
+    if len(recent60) < 40:
+        return 0, "第3波候補・判定不可", ["データ不足"]
+
+    high_pos = int(recent60["High"].values.argmax())
+    swing_high = float(recent60["High"].iloc[high_pos])
+    before_high = recent60.iloc[:high_pos]
+    after_high = recent60.iloc[high_pos + 1 :]
+    swing_start = float(before_high["Low"].min()) if len(before_high) else float(recent60["Low"].iloc[0])
+    pullback_low = float(after_high["Low"].min()) if len(after_high) else float(recent15["Low"].min())
+    latest_close = float(latest["Close"])
+
+    prior_impulse = False
+    if swing_start > 0 and swing_high / swing_start - 1 >= 0.08:
+        prior_impulse = True
+        score += 2
+        reasons.append("第1波候補: 直近60日内で8%以上の先行上昇: +2")
+
+    pullback_depth = np.nan
+    if swing_high > swing_start:
+        pullback_depth = (swing_high - pullback_low) / (swing_high - swing_start)
+
+    near_ma_recent = False
+    for _, row in recent15.iterrows():
+        for ma_col in ["MA25", "MA75"]:
+            ma_value = row.get(ma_col)
+            if pd.notna(ma_value) and ma_value > 0:
+                if abs(row["Low"] - ma_value) / ma_value <= 0.06 or abs(row["Close"] - ma_value) / ma_value <= 0.06:
+                    near_ma_recent = True
+                    break
+        if near_ma_recent:
+            break
+
+    constructive_pullback = (
+        pd.notna(pullback_depth)
+        and 0.25 <= pullback_depth <= 0.75
+        and latest_close > swing_start
+    )
+    if constructive_pullback or near_ma_recent:
+        score += 3
+        if constructive_pullback and near_ma_recent:
+            reasons.append("第2波候補: 先行上昇後の押しがMA25/MA75付近で止まりつつある: +3")
+        elif constructive_pullback:
+            reasons.append("第2波候補: 先行上昇に対して25-75%程度の押し: +3")
+        else:
+            reasons.append("第2波候補: MA25/MA75付近まで押して反転余地: +3")
+
+    close_up_2 = rising_close(df, 2)
+    close_up_3 = rising_close(df, 3)
+    macd_hist_rising = (
+        len(df) >= 3
+        and pd.notna(df["MACD_Hist"].iloc[-1])
+        and pd.notna(df["MACD_Hist"].iloc[-2])
+        and df["MACD_Hist"].iloc[-1] > df["MACD_Hist"].iloc[-2]
+    )
+    if pd.notna(latest.get("MA5")) and latest_close > latest["MA5"] and (close_up_2 or close_up_3 or macd_hist_rising):
+        score += 2
+        reasons.append("第3波初動候補: 終値がMA5上で切り上げ/MACD改善: +2")
+
+    volume20 = latest.get("Volume20")
+    volume_ratio = latest.get("VolumeRatio")
+    if pd.notna(volume20) and volume20 > 0:
+        recent_volume_ratio = recent5_ratio = recent10["Volume"].tail(3).mean() / volume20
+        if pd.notna(volume_ratio) and volume_ratio >= 1.5:
+            score += 2
+            reasons.append("出来高確認: 当日出来高が20日平均の1.5倍以上: +2")
+        elif recent_volume_ratio >= 1.1:
+            score += 1
+            reasons.append("出来高確認: 直近の出来高が20日平均を上回り始めた: +1")
+
+    overextended = False
+    if pd.notna(latest.get("MA25")) and latest["MA25"] > 0 and latest_close > latest["MA25"] * 1.20:
+        overextended = True
+    if pd.notna(latest.get("RSI14")) and latest["RSI14"] >= 80:
+        overextended = True
+    if pd.notna(latest.get("Return10d")) and latest["Return10d"] >= 0.25:
+        overextended = True
+
+    if overextended:
+        score -= 3
+        reasons.append("上げすぎ抑制: MA25乖離/RSI/10日上昇率が高い: -3")
+    elif prior_impulse and (constructive_pullback or near_ma_recent):
+        score += 1
+        reasons.append("上げすぎではない初動圏: +1")
+
+    score = int(min(max(score, 0), 10))
+    if score >= 8:
+        label = "第3波候補・強"
+    elif score >= 5:
+        label = "第3波候補"
+    elif score >= 3:
+        label = "上昇初動監視"
+    else:
+        label = "第3波候補・未確認"
+    return score, label, reasons
+
+
 def score_stock(df: pd.DataFrame) -> ScoreResult:
     if len(df) < 80:
         return ScoreResult(
@@ -409,6 +519,8 @@ def score_stock(df: pd.DataFrame) -> ScoreResult:
             volume_score=0,
             rsi_score=0,
             reversal_score=0,
+            wave_score=0,
+            wave_label="判定不可",
             risk_penalty=0,
             reversal_label="判定不可",
             comments=["データ不足"],
@@ -420,9 +532,10 @@ def score_stock(df: pd.DataFrame) -> ScoreResult:
     volume_score, volume_reasons = score_volume(df)
     rsi_score, rsi_reasons = score_rsi(df)
     reversal_score, reversal_label, reversal_reasons, _ = score_reversal(df)
+    wave_score, wave_label, wave_reasons = score_early_wave(df)
     risk_penalty, risk_reasons = score_risk(df)
 
-    total = trend_score + breakout_score + volume_score + rsi_score + reversal_score + risk_penalty
+    total = trend_score + breakout_score + volume_score + rsi_score + reversal_score + wave_score + risk_penalty
     total = int(min(max(total, 0), 100))
 
     comments: list[str] = []
@@ -434,6 +547,8 @@ def score_stock(df: pd.DataFrame) -> ScoreResult:
         comments.append("出来高増加")
     if reversal_label in {"反転初動・強", "反転初動・かなり強い"}:
         comments.append(reversal_label)
+    if wave_score >= 5:
+        comments.append(wave_label)
     if risk_penalty <= -10:
         comments.append("リスク減点大きめ")
     if not comments:
@@ -447,6 +562,8 @@ def score_stock(df: pd.DataFrame) -> ScoreResult:
         volume_score=volume_score,
         rsi_score=rsi_score,
         reversal_score=reversal_score,
+        wave_score=wave_score,
+        wave_label=wave_label,
         risk_penalty=risk_penalty,
         reversal_label=reversal_label,
         comments=comments,
@@ -456,6 +573,7 @@ def score_stock(df: pd.DataFrame) -> ScoreResult:
             "volume": volume_reasons,
             "rsi": rsi_reasons,
             "reversal": reversal_reasons,
+            "wave": wave_reasons,
             "risk": risk_reasons,
         },
     )
