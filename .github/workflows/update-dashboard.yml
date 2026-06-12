@@ -3,7 +3,7 @@ name: Update investment dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8 * * 1-5"
+    - cron: "17 8 * * 1-5"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
