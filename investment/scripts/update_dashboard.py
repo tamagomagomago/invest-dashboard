@@ -8,8 +8,9 @@ import html
 import json
 import shutil
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import matplotlib
 import matplotlib.font_manager
@@ -32,6 +33,16 @@ CHARTS_DIR = ROOT_DIR / "charts"
 DATA_DIR = ROOT_DIR / "data"
 REPORTS_DIR = ROOT_DIR / "reports"
 CHART_FONT_FAMILY = "DejaVu Sans"
+JST = ZoneInfo("Asia/Tokyo")
+MARKET_SYMBOLS = [
+    ("日経平均", "^N225"),
+    ("TOPIX ETF", "1306.T"),
+    ("グロース250 ETF", "2516.T"),
+    ("ドル円", "JPY=X"),
+    ("NASDAQ", "^IXIC"),
+    ("S&P500", "^GSPC"),
+    ("SOX", "^SOX"),
+]
 
 
 @dataclass
@@ -46,10 +57,23 @@ class StockSummary:
     rsi: float | None
     volume_ratio: float | None
     drawdown: float | None
+    return1d: float | None
     return5d: float | None
     chart_paths: dict[str, str]
     data_path: str | None
     score: ScoreResult
+    error: str | None = None
+
+
+@dataclass
+class MarketMove:
+    name: str
+    symbol: str
+    latest_date: str | None
+    close: float | None
+    return1d: float | None
+    return5d: float | None
+    return20d: float | None
     error: str | None = None
 
 
@@ -138,6 +162,38 @@ def fetch_prices(symbol: str, period: str) -> pd.DataFrame:
     return normalize_price_data(raw, symbol)
 
 
+def summarize_market_symbol(name: str, symbol: str) -> MarketMove:
+    try:
+        df = fetch_prices(symbol, "3mo")
+        if len(df) < 6:
+            raise ValueError("market data is too short")
+        latest = df.iloc[-1]
+        return MarketMove(
+            name=name,
+            symbol=symbol,
+            latest_date=latest.name.strftime("%Y-%m-%d"),
+            close=float(latest["Close"]),
+            return1d=float(df["Close"].pct_change(1).iloc[-1]) if len(df) >= 2 else None,
+            return5d=float(df["Close"].pct_change(5).iloc[-1]) if len(df) >= 6 else None,
+            return20d=float(df["Close"].pct_change(20).iloc[-1]) if len(df) >= 21 else None,
+        )
+    except Exception as exc:
+        return MarketMove(
+            name=name,
+            symbol=symbol,
+            latest_date=None,
+            close=None,
+            return1d=None,
+            return5d=None,
+            return20d=None,
+            error=str(exc),
+        )
+
+
+def summarize_market() -> list[MarketMove]:
+    return [summarize_market_symbol(name, symbol) for name, symbol in MARKET_SYMBOLS]
+
+
 def save_price_data(df: pd.DataFrame, code: str) -> str:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     path = DATA_DIR / f"{code}.csv"
@@ -211,6 +267,8 @@ def empty_score(label: str = "判定不可") -> ScoreResult:
         volume_score=0,
         rsi_score=0,
         reversal_score=0,
+        wave_score=0,
+        wave_label=label,
         risk_penalty=0,
         reversal_label=label,
         comments=["取得または判定に失敗"],
@@ -246,6 +304,7 @@ def summarize_stock(row: pd.Series, output_dir: Path, period: str) -> StockSumma
             rsi=float(latest["RSI14"]) if pd.notna(latest.get("RSI14")) else None,
             volume_ratio=float(latest["VolumeRatio"]) if pd.notna(latest.get("VolumeRatio")) else None,
             drawdown=float(latest["DrawdownFrom52wHigh"]) if pd.notna(latest.get("DrawdownFrom52wHigh")) else None,
+            return1d=float(latest["Return1d"]) if pd.notna(latest.get("Return1d")) else None,
             return5d=float(latest["Return5d"]) if pd.notna(latest.get("Return5d")) else None,
             chart_paths=chart_paths,
             data_path=data_path,
@@ -263,6 +322,7 @@ def summarize_stock(row: pd.Series, output_dir: Path, period: str) -> StockSumma
             rsi=None,
             volume_ratio=None,
             drawdown=None,
+            return1d=None,
             return5d=None,
             chart_paths={},
             data_path=None,
@@ -298,6 +358,16 @@ def score_class(item: StockSummary) -> str:
     return "score-exclude"
 
 
+def move_class(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "flat"
+    if value > 0:
+        return "up"
+    if value < 0:
+        return "down"
+    return "flat"
+
+
 def render_reason_list(reasons: list[str]) -> str:
     if not reasons:
         return "<li>該当なし</li>"
@@ -313,7 +383,116 @@ def render_reason_group(title: str, reasons: list[str]) -> str:
     """
 
 
-def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_date: str) -> str:
+def theme_strength(summaries: list[StockSummary]) -> list[dict[str, object]]:
+    buckets: dict[str, list[StockSummary]] = {}
+    for item in summaries:
+        if item.error:
+            continue
+        keys = [part.strip() for part in item.list_name.split("|") if part.strip()]
+        if item.memo:
+            keys.append(item.memo.strip())
+        for key in keys:
+            buckets.setdefault(key, []).append(item)
+
+    rows = []
+    for name, items in buckets.items():
+        returns = [item.return5d for item in items if item.return5d is not None and not pd.isna(item.return5d)]
+        volumes = [item.volume_ratio for item in items if item.volume_ratio is not None and not pd.isna(item.volume_ratio)]
+        if len(items) < 2:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "count": len(items),
+                "avg_return5d": float(np.nanmean(returns)) if returns else None,
+                "avg_volume": float(np.nanmean(volumes)) if volumes else None,
+                "avg_score": float(np.nanmean([item.score.total_score for item in items])),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["avg_return5d"] if row["avg_return5d"] is not None else -999,
+            row["avg_score"],
+        ),
+        reverse=True,
+    )
+
+
+def render_market_overview(market_moves: list[MarketMove], summaries: list[StockSummary]) -> str:
+    index_cards = []
+    for move in market_moves:
+        if move.error:
+            index_cards.append(
+                f"""
+                <div class="market-card muted">
+                  <strong>{html.escape(move.name)}</strong>
+                  <span>{html.escape(move.symbol)}</span>
+                  <em>取得不可</em>
+                </div>
+                """
+            )
+            continue
+        move_class = "up" if (move.return1d or 0) >= 0 else "down"
+        index_cards.append(
+            f"""
+            <div class="market-card {move_class}">
+              <strong>{html.escape(move.name)}</strong>
+              <span>{html.escape(move.latest_date or "-")} / {html.escape(move.symbol)}</span>
+              <em>{fmt_number(move.close, 2)}</em>
+              <small>1日 {fmt_percent(move.return1d)} / 5日 {fmt_percent(move.return5d)} / 20日 {fmt_percent(move.return20d)}</small>
+            </div>
+            """
+        )
+
+    themes = theme_strength(summaries)[:6]
+    theme_rows = "".join(
+        f"""
+        <li>
+          <strong>{html.escape(str(theme["name"]))}</strong>
+          <span>{int(theme["count"])}銘柄 / 5日 {fmt_percent(theme["avg_return5d"])} / 出来高 {fmt_number(theme["avg_volume"], 2)}x / 平均点 {fmt_number(theme["avg_score"], 1)}</span>
+        </li>
+        """
+        for theme in themes
+    ) or "<li>テーマ集計なし</li>"
+
+    early_items = sorted(
+        [item for item in summaries if not item.error],
+        key=lambda item: (item.score.wave_score, item.score.reversal_score, item.score.total_score),
+        reverse=True,
+    )[:5]
+    early_rows = "".join(
+        f"""
+        <li>
+          <strong>{html.escape(item.name)}</strong>
+          <span>{item.score.wave_score}/10 {html.escape(item.score.wave_label)} / 反転 {item.score.reversal_score}/25 / 総合 {item.score.total_score}</span>
+        </li>
+        """
+        for item in early_items
+    ) or "<li>候補なし</li>"
+
+    return f"""
+    <section class="market-overview">
+      <div class="overview-head">
+        <h2>今日の相場メモ</h2>
+        <p>指数・為替・リスト内テーマを価格データから自動集計。ニュース要約ではありません。</p>
+      </div>
+      <div class="market-grid">{''.join(index_cards)}</div>
+      <div class="overview-columns">
+        <div>
+          <h3>最近強いテーマ</h3>
+          <ul>{theme_rows}</ul>
+        </div>
+        <div>
+          <h3>上昇初動・第3波候補</h3>
+          <ul>{early_rows}</ul>
+        </div>
+      </div>
+    </section>
+    """
+
+
+def render_dashboard(summaries: list[StockSummary], market_moves: list[MarketMove], generated_on: str, chart_date: str) -> str:
     sorted_items = sorted(summaries, key=lambda item: item.score.total_score, reverse=True)
     list_names = []
     for item in summaries:
@@ -350,6 +529,7 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
                 render_reason_group("出来高", reasons.get("volume", [])),
                 render_reason_group("RSI", reasons.get("rsi", [])),
                 render_reason_group("反転初動", reasons.get("reversal", [])),
+                render_reason_group("上昇初動・第3波候補", reasons.get("wave", [])),
                 render_reason_group("リスク減点", reasons.get("risk", [])),
             ]
         )
@@ -361,6 +541,7 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
                 <div><dt>RSI14</dt><dd>{fmt_number(item.rsi, 1)}</dd></div>
                 <div><dt>出来高倍率</dt><dd>{fmt_number(item.volume_ratio, 2)}x</dd></div>
                 <div><dt>52週高値から</dt><dd>{fmt_percent(item.drawdown)}</dd></div>
+                <div><dt>今日の騰落率</dt><dd>{fmt_percent(item.return1d)}</dd></div>
                 <div><dt>5日騰落率</dt><dd>{fmt_percent(item.return5d)}</dd></div>
                 <div><dt>基準日</dt><dd>{html.escape(item.latest_date or "-")}</dd></div>
                 <div><dt>トレンド</dt><dd>{score.trend_score}/20</dd></div>
@@ -368,6 +549,7 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
                 <div><dt>出来高</dt><dd>{score.volume_score}/15</dd></div>
                 <div><dt>RSI</dt><dd>{score.rsi_score}/15</dd></div>
                 <div><dt>反転初動</dt><dd>{score.reversal_score}/25</dd></div>
+                <div><dt>第3波候補</dt><dd>{score.wave_score}/10</dd></div>
                 <div><dt>リスク</dt><dd>{score.risk_penalty}</dd></div>
               </dl>
         """
@@ -377,6 +559,7 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
               data-list="{html.escape(item.list_name)}"
               data-total="{score.total_score}"
               data-reversal="{score.reversal_score}"
+              data-wave="{score.wave_score}"
               data-breakout="{score.breakout_score}"
               data-volume="{score.volume_score}"
               data-risk="{score.risk_penalty}">
@@ -390,6 +573,8 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
               <div class="label-row">
                 <span>{html.escape(score.signal_label)}</span>
                 <span>{html.escape(score.reversal_label)}</span>
+                <span>{html.escape(score.wave_label)}</span>
+                <span class="move-badge {move_class(item.return1d)}">今日 {fmt_percent(item.return1d)}</span>
               </div>
               <div class="chart">{chart}</div>
               <details class="stock-detail">
@@ -472,6 +657,77 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
       cursor: pointer;
     }}
     button.active {{ background: var(--accent); border-color: var(--accent); color: #fff; }}
+    .market-overview {{
+      margin: 0;
+      padding: 18px clamp(16px, 4vw, 48px);
+      border-bottom: 1px solid var(--line);
+      background: rgba(247, 251, 255, 0.82);
+    }}
+    .overview-head {{
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+    }}
+    .overview-head h2, .overview-columns h3 {{
+      margin: 0;
+      letter-spacing: 0;
+    }}
+    .overview-head h2 {{ font-size: 18px; }}
+    .overview-head p {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+    }}
+    .market-grid {{
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 8px;
+    }}
+    .market-card {{
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }}
+    .market-card strong,
+    .market-card span,
+    .market-card em,
+    .market-card small {{
+      display: block;
+      overflow-wrap: anywhere;
+    }}
+    .market-card strong {{ font-size: 13px; }}
+    .market-card span, .market-card small {{ color: var(--muted); font-size: 11px; }}
+    .market-card em {{ font-style: normal; font-weight: 800; margin: 3px 0; }}
+    .market-card.up em {{ color: var(--strong); }}
+    .market-card.down em {{ color: var(--weak); }}
+    .overview-columns {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 14px;
+    }}
+    .overview-columns > div {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+    }}
+    .overview-columns h3 {{ font-size: 15px; }}
+    .overview-columns ul {{ padding-left: 0; list-style: none; }}
+    .overview-columns li {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      border-top: 1px solid #edf0f2;
+      padding: 8px 0;
+    }}
+    .overview-columns li:first-child {{ border-top: 0; }}
+    .overview-columns li span {{ color: var(--muted); text-align: right; }}
     main {{
       display: grid;
       gap: 16px;
@@ -527,6 +783,9 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
       font-size: 12px;
       font-weight: 700;
     }}
+    .label-row .move-badge.up {{ border-color: rgba(11, 122, 83, 0.28); color: var(--strong); background: rgba(11, 122, 83, 0.08); }}
+    .label-row .move-badge.down {{ border-color: rgba(156, 47, 47, 0.28); color: var(--weak); background: rgba(156, 47, 47, 0.08); }}
+    .label-row .move-badge.flat {{ background: #f8fafc; }}
     .chart {{ border-top: 1px solid var(--line); background: #fbfbfb; }}
     .chart img {{ display: block; width: 100%; height: auto; }}
     .chart-placeholder {{ min-height: 220px; display: grid; place-items: center; color: var(--muted); }}
@@ -565,6 +824,12 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
       .metrics {{ grid-template-columns: 1fr; }}
       .toolbar {{ align-items: stretch; }}
       .control-group {{ width: 100%; }}
+      .overview-head, .overview-columns li {{ display: block; }}
+      .overview-head p, .overview-columns li span {{ text-align: left; }}
+      .market-grid, .overview-columns {{ grid-template-columns: 1fr; }}
+    }}
+    @media (min-width: 521px) and (max-width: 1100px) {{
+      .market-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     }}
   </style>
 </head>
@@ -573,6 +838,7 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
     <h1>Investment Watchlist Dashboard</h1>
     <p>Generated: {html.escape(generated_on)} / Chart folder: charts/{html.escape(chart_date)} / スコアは売買推奨ではなく監視優先度です。</p>
   </header>
+  {render_market_overview(market_moves, summaries)}
   <nav class="toolbar" aria-label="Dashboard controls">
     <div class="control-group" aria-label="Watchlist filter">
       <span>リスト</span>
@@ -594,6 +860,7 @@ def render_dashboard(summaries: list[StockSummary], generated_on: str, chart_dat
       <span>並び替え</span>
       <button type="button" class="sort-tab active" data-sort="total" data-order="desc">総合</button>
       <button type="button" class="sort-tab" data-sort="reversal" data-order="desc">反転</button>
+      <button type="button" class="sort-tab" data-sort="wave" data-order="desc">初動</button>
       <button type="button" class="sort-tab" data-sort="breakout" data-order="desc">新高値</button>
       <button type="button" class="sort-tab" data-sort="volume" data-order="desc">出来高</button>
       <button type="button" class="sort-tab" data-sort="risk" data-order="asc">リスク</button>
@@ -699,6 +966,8 @@ def ranking_lines(items: list[StockSummary], key: str, limit: int | None = None)
             return f"{score.total_score}点 / {score.signal_label}"
         if key == "reversal":
             return f"{score.reversal_score}/25点 / {score.reversal_label}"
+        if key == "wave":
+            return f"{score.wave_score}/10点 / {score.wave_label}"
         if key == "breakout":
             return f"{score.breakout_score}/20点"
         if key == "volume":
@@ -713,11 +982,36 @@ def ranking_lines(items: list[StockSummary], key: str, limit: int | None = None)
     )
 
 
-def render_report(summaries: list[StockSummary], generated_on: str) -> str:
+def market_report_lines(market_moves: list[MarketMove]) -> str:
+    lines = []
+    for move in market_moves:
+        if move.error:
+            lines.append(f"- {move.name} ({move.symbol}): 取得不可")
+        else:
+            lines.append(
+                f"- {move.name} ({move.symbol}): {fmt_number(move.close, 2)} / "
+                f"1日 {fmt_percent(move.return1d)} / 5日 {fmt_percent(move.return5d)} / 20日 {fmt_percent(move.return20d)}"
+            )
+    return "\n".join(lines) if lines else "- なし"
+
+
+def theme_report_lines(summaries: list[StockSummary]) -> str:
+    themes = theme_strength(summaries)[:10]
+    if not themes:
+        return "- なし"
+    return "\n".join(
+        f"- {theme['name']}: {int(theme['count'])}銘柄 / 5日 {fmt_percent(theme['avg_return5d'])} / "
+        f"出来高 {fmt_number(theme['avg_volume'], 2)}x / 平均点 {fmt_number(theme['avg_score'], 1)}"
+        for theme in themes
+    )
+
+
+def render_report(summaries: list[StockSummary], market_moves: list[MarketMove], generated_on: str) -> str:
     ok_items = [item for item in summaries if not item.error]
     errors = [item for item in summaries if item.error]
     total_ranked = sorted(ok_items, key=lambda item: item.score.total_score, reverse=True)
     reversal_ranked = sorted(ok_items, key=lambda item: item.score.reversal_score, reverse=True)
+    wave_ranked = sorted(ok_items, key=lambda item: item.score.wave_score, reverse=True)
     breakout_ranked = sorted(ok_items, key=lambda item: item.score.breakout_score, reverse=True)
     volume_ranked = sorted(ok_items, key=lambda item: item.score.volume_score, reverse=True)
     risk_ranked = sorted(ok_items, key=lambda item: item.score.risk_penalty)
@@ -731,6 +1025,14 @@ Generated: {generated_on}
 
 このスコアは売買推奨ではなく、監視優先度を決めるためのスコアです。
 
+## 今日の相場メモ
+
+{market_report_lines(market_moves)}
+
+## 最近強いテーマ
+
+{theme_report_lines(summaries)}
+
 ## 総合スコアランキング
 
 {ranking_lines(total_ranked, "total")}
@@ -738,6 +1040,10 @@ Generated: {generated_on}
 ## 反転初動スコアランキング
 
 {ranking_lines(reversal_ranked, "reversal")}
+
+## 上昇初動・第3波候補ランキング
+
+{ranking_lines(wave_ranked, "wave")}
 
 ## 新高値ブレイク候補ランキング
 
@@ -761,16 +1067,16 @@ Generated: {generated_on}
 """
 
 
-def write_outputs(summaries: list[StockSummary], chart_date: str) -> None:
-    generated_on = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-    dashboard_html = render_dashboard(summaries, generated_on, chart_date)
+def write_outputs(summaries: list[StockSummary], market_moves: list[MarketMove], chart_date: str) -> None:
+    generated_on = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST")
+    dashboard_html = render_dashboard(summaries, market_moves, generated_on, chart_date)
     DASHBOARD_PATH.write_text(dashboard_html, encoding="utf-8")
     INDEX_PATH.write_text(dashboard_html, encoding="utf-8")
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     daily_report_dir = REPORTS_DIR / chart_date
     daily_report_dir.mkdir(parents=True, exist_ok=True)
-    report = render_report(summaries, generated_on)
+    report = render_report(summaries, market_moves, generated_on)
     REPORT_PATH.write_text(report, encoding="utf-8")
     (REPORTS_DIR / "report.md").write_text(report, encoding="utf-8")
     (daily_report_dir / "report.md").write_text(report, encoding="utf-8")
@@ -793,7 +1099,12 @@ def write_outputs(summaries: list[StockSummary], chart_date: str) -> None:
                 "volume_score": item.score.volume_score,
                 "rsi_score": item.score.rsi_score,
                 "reversal_score": item.score.reversal_score,
+                "wave_score": item.score.wave_score,
+                "wave_label": item.score.wave_label,
                 "risk_penalty": item.score.risk_penalty,
+                "return1d": item.return1d,
+                "return5d": item.return5d,
+                "volume_ratio": item.volume_ratio,
                 "comments": item.score.comments,
                 "reasons": item.score.reasons,
                 "error": item.error,
@@ -837,7 +1148,8 @@ def main() -> None:
         summarize_stock(row, output_dir, args.period)
         for _, row in watchlist.iterrows()
     ]
-    write_outputs(summaries, args.date)
+    market_moves = summarize_market()
+    write_outputs(summaries, market_moves, args.date)
     if any(item.chart_paths for item in summaries):
         copy_latest_charts(output_dir)
 
