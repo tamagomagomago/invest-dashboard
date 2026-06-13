@@ -403,61 +403,76 @@ def score_risk(df: pd.DataFrame) -> tuple[int, list[str]]:
 
 
 def score_early_wave(df: pd.DataFrame) -> tuple[int, str, list[str]]:
-    """Heuristic for a Wave-3-like early advance after a constructive pullback."""
+    """Heuristic for a Wave-3-like restart after a first advance and pullback."""
     latest = df.iloc[-1]
+    recent75 = df.tail(75)
     recent60 = df.tail(60)
-    recent30 = df.tail(30)
-    recent15 = df.tail(15)
+    recent20 = df.tail(20)
     recent10 = df.tail(10)
 
     score = 0
     reasons: list[str] = []
 
-    if len(recent60) < 40:
+    if len(recent75) < 60:
         return 0, "第3波候補・判定不可", ["データ不足"]
+
+    latest_close = float(latest["Close"])
+    ma5 = latest.get("MA5")
+    ma25 = latest.get("MA25")
+    ma75 = latest.get("MA75")
+
+    ma25_up = pd.notna(ma25) and pd.notna(df["MA25"].iloc[-6]) and ma25 > df["MA25"].iloc[-6]
+    ma75_up = pd.notna(ma75) and pd.notna(df["MA75"].iloc[-11]) and ma75 >= df["MA75"].iloc[-11]
+    perfect_order = pd.notna(ma5) and pd.notna(ma25) and pd.notna(ma75) and ma5 > ma25 > ma75
+    above_mid_ma = pd.notna(ma25) and latest_close > ma25
+
+    if above_mid_ma and ma25_up:
+        score += 1
+        reasons.append("上昇基調: 終値がMA25上でMA25も上向き: +1")
+    if perfect_order and ma75_up:
+        score += 2
+        reasons.append("上昇基調: MA5 > MA25 > MA75 かつMA75横ばい以上: +2")
 
     high_pos = int(recent60["High"].values.argmax())
     swing_high = float(recent60["High"].iloc[high_pos])
     before_high = recent60.iloc[:high_pos]
     after_high = recent60.iloc[high_pos + 1 :]
     swing_start = float(before_high["Low"].min()) if len(before_high) else float(recent60["Low"].iloc[0])
-    pullback_low = float(after_high["Low"].min()) if len(after_high) else float(recent15["Low"].min())
-    latest_close = float(latest["Close"])
+    pullback_low = float(after_high["Low"].min()) if len(after_high) else float(recent20["Low"].min())
 
-    prior_impulse = False
-    if swing_start > 0 and swing_high / swing_start - 1 >= 0.08:
-        prior_impulse = True
+    prior_impulse = swing_start > 0 and swing_high / swing_start - 1 >= 0.10
+    if prior_impulse:
         score += 2
-        reasons.append("第1波候補: 直近60日内で8%以上の先行上昇: +2")
+        reasons.append("第1波候補: 直近60日内で10%以上の先行上昇: +2")
 
     pullback_depth = np.nan
     if swing_high > swing_start:
         pullback_depth = (swing_high - pullback_low) / (swing_high - swing_start)
 
     near_ma_recent = False
-    for _, row in recent15.iterrows():
+    held_ma75 = True
+    for _, row in recent20.iterrows():
         for ma_col in ["MA25", "MA75"]:
             ma_value = row.get(ma_col)
             if pd.notna(ma_value) and ma_value > 0:
                 if abs(row["Low"] - ma_value) / ma_value <= 0.06 or abs(row["Close"] - ma_value) / ma_value <= 0.06:
                     near_ma_recent = True
-                    break
-        if near_ma_recent:
-            break
+        row_ma75 = row.get("MA75")
+        if pd.notna(row_ma75) and row["Close"] < row_ma75 * 0.92:
+            held_ma75 = False
 
     constructive_pullback = (
         pd.notna(pullback_depth)
-        and 0.25 <= pullback_depth <= 0.75
+        and 0.25 <= pullback_depth <= 0.65
         and latest_close > swing_start
+        and held_ma75
     )
-    if constructive_pullback or near_ma_recent:
+    if constructive_pullback and near_ma_recent:
         score += 3
-        if constructive_pullback and near_ma_recent:
-            reasons.append("第2波候補: 先行上昇後の押しがMA25/MA75付近で止まりつつある: +3")
-        elif constructive_pullback:
-            reasons.append("第2波候補: 先行上昇に対して25-75%程度の押し: +3")
-        else:
-            reasons.append("第2波候補: MA25/MA75付近まで押して反転余地: +3")
+        reasons.append("第2波候補: 25-65%程度の押しがMA25/MA75付近で止まる: +3")
+    elif constructive_pullback or (near_ma_recent and above_mid_ma and ma25_up):
+        score += 2
+        reasons.append("第2波候補: 押し目後にMA25上へ戻りつつある: +2")
 
     close_up_2 = rising_close(df, 2)
     close_up_3 = rising_close(df, 3)
@@ -467,35 +482,47 @@ def score_early_wave(df: pd.DataFrame) -> tuple[int, str, list[str]]:
         and pd.notna(df["MACD_Hist"].iloc[-2])
         and df["MACD_Hist"].iloc[-1] > df["MACD_Hist"].iloc[-2]
     )
-    if pd.notna(latest.get("MA5")) and latest_close > latest["MA5"] and (close_up_2 or close_up_3 or macd_hist_rising):
+    macd_hist_positive = pd.notna(latest.get("MACD_Hist")) and latest["MACD_Hist"] > 0
+    twenty_day_break = pd.notna(latest.get("PrevHigh20")) and latest_close > latest["PrevHigh20"]
+    restart_signal = (close_up_2 or close_up_3) and (macd_hist_rising or macd_hist_positive or twenty_day_break)
+    if pd.notna(ma5) and latest_close > ma5 and restart_signal:
         score += 2
-        reasons.append("第3波初動候補: 終値がMA5上で切り上げ/MACD改善: +2")
+        reasons.append("第3波初動候補: MA5上で終値切り上げ、MACD/20日高値が改善: +2")
 
     volume20 = latest.get("Volume20")
     volume_ratio = latest.get("VolumeRatio")
     if pd.notna(volume20) and volume20 > 0:
-        recent_volume_ratio = recent5_ratio = recent10["Volume"].tail(3).mean() / volume20
-        if pd.notna(volume_ratio) and volume_ratio >= 1.5:
+        recent_volume_ratio = recent10["Volume"].tail(3).mean() / volume20
+        if pd.notna(volume_ratio) and volume_ratio >= 1.5 and latest_close >= latest["Open"]:
             score += 2
-            reasons.append("出来高確認: 当日出来高が20日平均の1.5倍以上: +2")
-        elif recent_volume_ratio >= 1.1:
+            reasons.append("出来高確認: 陽線/下げ止まり日に20日平均の1.5倍以上: +2")
+        elif recent_volume_ratio >= 1.15 and (close_up_2 or close_up_3):
             score += 1
-            reasons.append("出来高確認: 直近の出来高が20日平均を上回り始めた: +1")
+            reasons.append("出来高確認: 直近の出来高が増えながら切り上げ: +1")
 
     overextended = False
-    if pd.notna(latest.get("MA25")) and latest["MA25"] > 0 and latest_close > latest["MA25"] * 1.20:
+    if pd.notna(ma25) and ma25 > 0 and latest_close > ma25 * 1.15:
         overextended = True
-    if pd.notna(latest.get("RSI14")) and latest["RSI14"] >= 80:
+    if pd.notna(latest.get("RSI14")) and latest["RSI14"] >= 78:
         overextended = True
-    if pd.notna(latest.get("Return10d")) and latest["Return10d"] >= 0.25:
+    if pd.notna(latest.get("Return10d")) and latest["Return10d"] >= 0.20:
+        overextended = True
+    if pd.notna(latest.get("DrawdownFrom52wHigh")) and latest["DrawdownFrom52wHigh"] <= -0.25:
         overextended = True
 
     if overextended:
         score -= 3
-        reasons.append("上げすぎ抑制: MA25乖離/RSI/10日上昇率が高い: -3")
-    elif prior_impulse and (constructive_pullback or near_ma_recent):
-        score += 1
-        reasons.append("上げすぎではない初動圏: +1")
+        reasons.append("上げすぎ/崩れ抑制: MA25乖離・RSI・10日上昇率・高値下落率で減点: -3")
+
+    if not (above_mid_ma and ma25_up and (perfect_order or ma75_up)):
+        score = min(score, 6)
+        reasons.append("上限調整: MAの上昇基調が弱いため最大6点")
+    if not restart_signal:
+        score = min(score, 6)
+        reasons.append("上限調整: 再加速シグナル不足のため最大6点")
+    if not (constructive_pullback or near_ma_recent):
+        score = min(score, 5)
+        reasons.append("上限調整: 押し目形成が弱いため最大5点")
 
     score = int(min(max(score, 0), 10))
     if score >= 8:
