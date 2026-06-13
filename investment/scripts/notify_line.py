@@ -32,6 +32,11 @@ def send_line_message(message: str) -> None:
         },
         timeout=20,
     )
+    if response.status_code >= 400:
+        print(
+            f"LINE notification response: {response.status_code} {response.text}",
+            file=sys.stderr,
+        )
     response.raise_for_status()
     print("LINE notification sent.")
 
