@@ -3,13 +3,17 @@ name: Update investment dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 8 * * 1-5"
+    # GitHub Actions schedules are UTC and can be delayed. These are
+    # 17:05, 17:17, 17:30, 17:45, 18:00, and 18:30 JST on weekdays.
+    - cron: "5,17,30,45 8 * * 1-5"
+    - cron: "0,30 9 * * 1-5"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -18,7 +22,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+    steps:
+      - name: Decide whether to run today
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run: dashboard update will run."
+            exit 0
+          fi
+
+          today_jst="$(TZ=Asia/Tokyo date +%F)"
+          prior_successes="$(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "Update investment dashboard" \
+              --limit 40 \
+              --json databaseId,conclusion,updatedAt \
+              --jq '[.[] | select(.databaseId != ${{ github.run_id }}) | select(.conclusion == "success") | select((.updatedAt | fromdateiso8601 + 32400 | strftime("%Y-%m-%d")) == "'"$today_jst"'")] | length'
+          )"
+
+          if [ "$prior_successes" -gt 0 ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "A successful dashboard update already completed today in JST: $today_jst."
+            exit 0
+          fi
+
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "No successful dashboard update found today in JST: $today_jst."
+
   build:
+    needs: gate
+    if: needs.gate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -44,6 +85,7 @@ jobs:
 
   deploy:
     needs: build
+    if: needs.build.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -54,8 +96,8 @@ jobs:
         uses: actions/deploy-pages@v4
 
   notify:
-    needs: [build, deploy]
-    if: always()
+    needs: [gate, build, deploy]
+    if: always() && needs.gate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
