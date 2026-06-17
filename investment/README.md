@@ -45,12 +45,15 @@ open investment/dashboard.html
 
 `.github/workflows/update-dashboard.yml` で GitHub Actions + GitHub Pages の自動更新を設定しています。
 
-- 平日 17:00 JST に自動更新
+- GitHub Actions のscheduleは保険として平日17:05〜19:55 JSTに複数回起動
+- 安定運用の本命は外部cronから `workflow_dispatch` を直接叩く方式
 - GitHub Actions の `workflow_dispatch` から手動更新も可能
 - 公開対象は `investment/`
 - `investment/index.html` と `investment/dashboard.html` を生成
 
 GitHub側では、リポジトリの `Settings > Pages` で `Build and deployment` を `GitHub Actions` にしてください。
+
+外部cronの設定手順は `docs/external-cron.md` を参照してください。
 
 日経225は `watchlist.csv` の `list` に `日経225` として登録しています。既存の監視銘柄と重なる銘柄は `監視銘柄|日経225` のように複数リスト所属にして、二重取得を避けています。
 
