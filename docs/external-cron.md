@@ -4,6 +4,16 @@ GitHub Actions の `schedule` は遅延・未発火が起きることがある�
 
 GitHub Actions側の `schedule` は保険として残す。本命は外部cron。
 
+## 現在の設定
+
+- cron-job.org job title: `invest-dashboard-update`
+- cron-job.org job ID: `7844579`
+- Schedule: 平日 17:05 JST
+- URL: `https://api.github.com/repos/tamagomagomago/invest-dashboard/actions/workflows/update-dashboard.yml/dispatches`
+- Method: `POST`
+- Body: `{"ref":"main"}`
+- GitHub Actions側で同じ日本日付の成功済みrunがある場合は、`gate` ジョブのみ成功して本更新はスキップされる。
+
 ## 方式
 
 外部cronから次のGitHub APIを `POST` する。
