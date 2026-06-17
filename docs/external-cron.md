@@ -18,6 +18,8 @@ Body:
 {"ref":"main"}
 ```
 
+このbodyでは、同じ日本日付ですでに成功済みの更新がある場合は `gate` ジョブでスキップされる。
+
 Headers:
 
 ```text
@@ -83,6 +85,13 @@ export GITHUB_WORKFLOW_TOKEN="作成したtoken"
 ```
 
 成功するとGitHub Actionsに `workflow_dispatch` のrunが作成される。
+すでに同じ日本日付で更新成功済みの場合は、`gate` ジョブだけ成功して本更新はスキップされる。
+
+どうしても強制的に再更新したい場合だけ、次のように実行する。
+
+```bash
+FORCE=true ./scripts/trigger_dashboard_update.sh
+```
 
 ## 運用メモ
 

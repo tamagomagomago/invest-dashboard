@@ -2,6 +2,12 @@ name: Update investment dashboard
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even if a dashboard update already succeeded today in JST"
+        required: false
+        default: "false"
+        type: boolean
   schedule:
     # GitHub Actions schedules are UTC and can be delayed or occasionally
     # skipped. Try repeatedly from 17:05 to 19:55 JST on weekdays; the gate
@@ -50,9 +56,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Manual run: dashboard update will run."
+            echo "Forced manual run: dashboard update will run."
             exit 0
           fi
 
