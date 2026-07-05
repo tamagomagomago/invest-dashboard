@@ -3,12 +3,54 @@ name: Update investment dashboard
 on:
   workflow_dispatch:
 
-# Auto updates are disabled to stop GitHub Actions storage growth.
-# Re-enable intentionally when the dashboard update volume is reduced.
+# Scheduled auto updates are disabled to stop GitHub Actions storage growth.
+# This workflow can still be run manually when the lightweight dashboard needs updating.
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
-  disabled:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Auto update disabled
-        run: echo "Investment dashboard auto update is disabled to reduce GitHub Actions storage usage."
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate lightweight dashboard
+        run: python investment/scripts/update_dashboard.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: investment
+
+  deploy:
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
