@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""Fetch prices, score watchlist stocks, and render the investment dashboard."""
+"""Fetch prices, score watchlist stocks, and render a lightweight investment dashboard.
+
+This version intentionally does not generate PNG charts or per-symbol CSV files.
+It keeps GitHub Pages artifacts small: dashboard HTML, report markdown, and latest score JSON only.
+"""
 
 from __future__ import annotations
 
 import argparse
 import html
 import json
-import shutil
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import matplotlib
-import matplotlib.font_manager
-import matplotlib.lines as mlines
-import matplotlib.pyplot as plt
-import mplfinance as mpf
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -29,10 +27,8 @@ WATCHLIST_PATH = ROOT_DIR / "watchlist.csv"
 DASHBOARD_PATH = ROOT_DIR / "dashboard.html"
 INDEX_PATH = ROOT_DIR / "index.html"
 REPORT_PATH = ROOT_DIR / "report.md"
-CHARTS_DIR = ROOT_DIR / "charts"
 DATA_DIR = ROOT_DIR / "data"
 REPORTS_DIR = ROOT_DIR / "reports"
-CHART_FONT_FAMILY = "DejaVu Sans"
 JST = ZoneInfo("Asia/Tokyo")
 MARKET_SYMBOLS = [
     ("日経平均", "^N225"),
@@ -59,8 +55,6 @@ class StockSummary:
     drawdown: float | None
     return1d: float | None
     return5d: float | None
-    chart_paths: dict[str, str]
-    data_path: str | None
     score: ScoreResult
     error: str | None = None
 
@@ -75,24 +69,6 @@ class MarketMove:
     return5d: float | None
     return20d: float | None
     error: str | None = None
-
-
-def configure_fonts() -> None:
-    global CHART_FONT_FAMILY
-    candidates = [
-        "Hiragino Sans",
-        "Hiragino Kaku Gothic ProN",
-        "Yu Gothic",
-        "Noto Sans CJK JP",
-        "Arial Unicode MS",
-    ]
-    available = {font.name for font in matplotlib.font_manager.fontManager.ttflist}
-    for family in candidates:
-        if family in available:
-            CHART_FONT_FAMILY = family
-            matplotlib.rcParams["font.family"] = family
-            break
-    matplotlib.rcParams["axes.unicode_minus"] = False
 
 
 def fmt_number(value: float | None, digits: int = 1) -> str:
@@ -162,102 +138,6 @@ def fetch_prices(symbol: str, period: str) -> pd.DataFrame:
     return normalize_price_data(raw, symbol)
 
 
-def summarize_market_symbol(name: str, symbol: str) -> MarketMove:
-    try:
-        df = fetch_prices(symbol, "3mo")
-        if len(df) < 6:
-            raise ValueError("market data is too short")
-        latest = df.iloc[-1]
-        return MarketMove(
-            name=name,
-            symbol=symbol,
-            latest_date=latest.name.strftime("%Y-%m-%d"),
-            close=float(latest["Close"]),
-            return1d=float(df["Close"].pct_change(1).iloc[-1]) if len(df) >= 2 else None,
-            return5d=float(df["Close"].pct_change(5).iloc[-1]) if len(df) >= 6 else None,
-            return20d=float(df["Close"].pct_change(20).iloc[-1]) if len(df) >= 21 else None,
-        )
-    except Exception as exc:
-        return MarketMove(
-            name=name,
-            symbol=symbol,
-            latest_date=None,
-            close=None,
-            return1d=None,
-            return5d=None,
-            return20d=None,
-            error=str(exc),
-        )
-
-
-def summarize_market() -> list[MarketMove]:
-    return [summarize_market_symbol(name, symbol) for name, symbol in MARKET_SYMBOLS]
-
-
-def save_price_data(df: pd.DataFrame, code: str) -> str:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    path = DATA_DIR / f"{code}.csv"
-    df.to_csv(path, encoding="utf-8")
-    return path.relative_to(ROOT_DIR).as_posix()
-
-
-def chart_style() -> dict:
-    return mpf.make_mpf_style(
-        base_mpf_style="yahoo",
-        rc={
-            "font.family": CHART_FONT_FAMILY,
-            "axes.unicode_minus": False,
-            "font.size": 12,
-            "axes.labelsize": 12,
-            "xtick.labelsize": 11,
-            "ytick.labelsize": 11,
-            "legend.fontsize": 12,
-        },
-    )
-
-
-def make_chart(df: pd.DataFrame, code: str, name: str, output_dir: Path, filename: str, label: str, trading_days: int) -> str:
-    chart_df = df.tail(trading_days).copy()
-    addplots = []
-    ma_styles = [("MA5", "#e4572e", "MA5"), ("MA25", "#2e86ab", "MA25"), ("MA75", "#4f772d", "MA75")]
-    legend_handles = []
-    for column, color, label_name in ma_styles:
-        if column in chart_df and chart_df[column].notna().any():
-            addplots.append(mpf.make_addplot(chart_df[column], color=color, width=1.8))
-            legend_handles.append(mlines.Line2D([], [], color=color, linewidth=2.2, label=label_name))
-    if "RSI14" in chart_df and chart_df["RSI14"].notna().any():
-        addplots.append(mpf.make_addplot(chart_df["RSI14"], panel=2, color="#7b2cbf", width=1.4, ylabel="RSI"))
-    output_path = output_dir / filename
-    fig, axes = mpf.plot(
-        chart_df,
-        type="candle",
-        style=chart_style(),
-        volume=True,
-        addplot=addplots if addplots else None,
-        ylabel="",
-        ylabel_lower="Volume",
-        panel_ratios=(4, 1.2, 1),
-        figsize=(14, 9),
-        tight_layout=True,
-        returnfig=True,
-    )
-    if legend_handles:
-        axes[0].legend(handles=legend_handles, loc="upper left", frameon=True, facecolor="white", framealpha=0.85)
-    fig.savefig(str(output_path), dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    return output_path.relative_to(ROOT_DIR).as_posix()
-
-
-def make_charts(df: pd.DataFrame, code: str, name: str, output_dir: Path) -> dict[str, str]:
-    chart_paths = {
-        "1m": make_chart(df, code, name, output_dir, f"{code}_1m.png", "1m", 22),
-        "3m": make_chart(df, code, name, output_dir, f"{code}_3m.png", "3m", 66),
-        "6m": make_chart(df, code, name, output_dir, f"{code}_6m.png", "6m", 132),
-    }
-    chart_paths["latest"] = make_chart(df, code, name, output_dir, f"{code}.png", "latest", 132)
-    return chart_paths
-
-
 def empty_score(label: str = "判定不可") -> ScoreResult:
     return ScoreResult(
         total_score=0,
@@ -276,7 +156,30 @@ def empty_score(label: str = "判定不可") -> ScoreResult:
     )
 
 
-def summarize_stock(row: pd.Series, output_dir: Path, period: str) -> StockSummary:
+def summarize_market_symbol(name: str, symbol: str) -> MarketMove:
+    try:
+        df = fetch_prices(symbol, "3mo")
+        if len(df) < 6:
+            raise ValueError("market data is too short")
+        latest = df.iloc[-1]
+        return MarketMove(
+            name=name,
+            symbol=symbol,
+            latest_date=latest.name.strftime("%Y-%m-%d"),
+            close=float(latest["Close"]),
+            return1d=float(df["Close"].pct_change(1).iloc[-1]) if len(df) >= 2 else None,
+            return5d=float(df["Close"].pct_change(5).iloc[-1]) if len(df) >= 6 else None,
+            return20d=float(df["Close"].pct_change(20).iloc[-1]) if len(df) >= 21 else None,
+        )
+    except Exception as exc:
+        return MarketMove(name, symbol, None, None, None, None, None, str(exc))
+
+
+def summarize_market() -> list[MarketMove]:
+    return [summarize_market_symbol(name, symbol) for name, symbol in MARKET_SYMBOLS]
+
+
+def summarize_stock(row: pd.Series, period: str) -> StockSummary:
     code = str(row["code"]).strip()
     name = str(row["name"]).strip()
     memo = str(row["memo"]).strip()
@@ -288,11 +191,8 @@ def summarize_stock(row: pd.Series, output_dir: Path, period: str) -> StockSumma
         if len(df) < 20:
             raise ValueError(f"indicator calculation needs at least 20 rows, got {len(df)}")
         df = add_indicators(df)
-        data_path = save_price_data(df, code)
         score = score_stock(df)
-        chart_paths = make_charts(df, code, name, output_dir)
         latest = df.iloc[-1]
-
         return StockSummary(
             code=code,
             name=name,
@@ -306,8 +206,6 @@ def summarize_stock(row: pd.Series, output_dir: Path, period: str) -> StockSumma
             drawdown=float(latest["DrawdownFrom52wHigh"]) if pd.notna(latest.get("DrawdownFrom52wHigh")) else None,
             return1d=float(latest["Return1d"]) if pd.notna(latest.get("Return1d")) else None,
             return5d=float(latest["Return5d"]) if pd.notna(latest.get("Return5d")) else None,
-            chart_paths=chart_paths,
-            data_path=data_path,
             score=score,
         )
     except Exception as exc:
@@ -324,38 +222,22 @@ def summarize_stock(row: pd.Series, output_dir: Path, period: str) -> StockSumma
             drawdown=None,
             return1d=None,
             return5d=None,
-            chart_paths={},
-            data_path=None,
             score=empty_score(),
             error=str(exc),
         )
 
 
-def badge_class(item: StockSummary) -> str:
+def score_class(item: StockSummary) -> str:
     if item.error:
         return "muted"
-    if item.score.total_score >= 75:
+    score = item.score.total_score
+    if score >= 75:
         return "strong"
-    if item.score.total_score >= 50:
+    if score >= 50:
         return "watch"
-    if item.score.total_score >= 35:
+    if score >= 35:
         return "weak"
     return "exclude"
-
-
-def score_class(item: StockSummary) -> str:
-    score = item.score.total_score
-    if item.error:
-        return "score-muted"
-    if score >= 75:
-        return "score-strong"
-    if score >= 65:
-        return "score-good"
-    if score >= 50:
-        return "score-watch"
-    if score >= 35:
-        return "score-weak"
-    return "score-exclude"
 
 
 def move_class(value: float | None) -> str:
@@ -366,21 +248,6 @@ def move_class(value: float | None) -> str:
     if value < 0:
         return "down"
     return "flat"
-
-
-def render_reason_list(reasons: list[str]) -> str:
-    if not reasons:
-        return "<li>該当なし</li>"
-    return "".join(f"<li>{html.escape(reason)}</li>" for reason in reasons)
-
-
-def render_reason_group(title: str, reasons: list[str]) -> str:
-    return f"""
-    <details>
-      <summary>{html.escape(title)}</summary>
-      <ul>{render_reason_list(reasons)}</ul>
-    </details>
-    """
 
 
 def theme_strength(summaries: list[StockSummary]) -> list[dict[str, object]]:
@@ -396,10 +263,10 @@ def theme_strength(summaries: list[StockSummary]) -> list[dict[str, object]]:
 
     rows = []
     for name, items in buckets.items():
-        returns = [item.return5d for item in items if item.return5d is not None and not pd.isna(item.return5d)]
-        volumes = [item.volume_ratio for item in items if item.volume_ratio is not None and not pd.isna(item.volume_ratio)]
         if len(items) < 2:
             continue
+        returns = [item.return5d for item in items if item.return5d is not None and not pd.isna(item.return5d)]
+        volumes = [item.volume_ratio for item in items if item.volume_ratio is not None and not pd.isna(item.volume_ratio)]
         rows.append(
             {
                 "name": name,
@@ -420,39 +287,26 @@ def theme_strength(summaries: list[StockSummary]) -> list[dict[str, object]]:
 
 
 def render_market_overview(market_moves: list[MarketMove], summaries: list[StockSummary]) -> str:
-    index_cards = []
+    cards = []
     for move in market_moves:
         if move.error:
-            index_cards.append(
-                f"""
-                <div class="market-card muted">
-                  <strong>{html.escape(move.name)}</strong>
-                  <span>{html.escape(move.symbol)}</span>
-                  <em>取得不可</em>
-                </div>
-                """
-            )
+            cards.append(f"<div class='market-card muted'><strong>{html.escape(move.name)}</strong><em>取得不可</em></div>")
             continue
-        move_class = "up" if (move.return1d or 0) >= 0 else "down"
-        index_cards.append(
+        cls = "up" if (move.return1d or 0) >= 0 else "down"
+        cards.append(
             f"""
-            <div class="market-card {move_class}">
+            <div class="market-card {cls}">
               <strong>{html.escape(move.name)}</strong>
-              <span>{html.escape(move.latest_date or "-")} / {html.escape(move.symbol)}</span>
+              <span>{html.escape(move.latest_date or '-')} / {html.escape(move.symbol)}</span>
               <em>{fmt_number(move.close, 2)}</em>
               <small>1日 {fmt_percent(move.return1d)} / 5日 {fmt_percent(move.return5d)} / 20日 {fmt_percent(move.return20d)}</small>
             </div>
             """
         )
 
-    themes = theme_strength(summaries)[:6]
+    themes = theme_strength(summaries)[:8]
     theme_rows = "".join(
-        f"""
-        <li>
-          <strong>{html.escape(str(theme["name"]))}</strong>
-          <span>{int(theme["count"])}銘柄 / 5日 {fmt_percent(theme["avg_return5d"])} / 出来高 {fmt_number(theme["avg_volume"], 2)}x / 平均点 {fmt_number(theme["avg_score"], 1)}</span>
-        </li>
-        """
+        f"<li><strong>{html.escape(str(theme['name']))}</strong><span>{int(theme['count'])}銘柄 / 5日 {fmt_percent(theme['avg_return5d'])} / 出来高 {fmt_number(theme['avg_volume'], 2)}x / 平均点 {fmt_number(theme['avg_score'], 1)}</span></li>"
         for theme in themes
     ) or "<li>テーマ集計なし</li>"
 
@@ -460,131 +314,57 @@ def render_market_overview(market_moves: list[MarketMove], summaries: list[Stock
         [item for item in summaries if not item.error],
         key=lambda item: (item.score.wave_score, item.score.reversal_score, item.score.total_score),
         reverse=True,
-    )[:5]
+    )[:8]
     early_rows = "".join(
-        f"""
-        <li>
-          <strong>{html.escape(item.name)}</strong>
-          <span>{item.score.wave_score}/10 {html.escape(item.score.wave_label)} / 反転 {item.score.reversal_score}/25 / 総合 {item.score.total_score}</span>
-        </li>
-        """
+        f"<li><strong>{html.escape(item.code)} {html.escape(item.name)}</strong><span>初動 {item.score.wave_score}/10 / 反転 {item.score.reversal_score}/25 / 総合 {item.score.total_score}</span></li>"
         for item in early_items
     ) or "<li>候補なし</li>"
 
     return f"""
     <section class="market-overview">
-      <div class="overview-head">
-        <h2>今日の相場メモ</h2>
-        <p>指数・為替・リスト内テーマを価格データから自動集計。ニュース要約ではありません。</p>
-      </div>
-      <div class="market-grid">{''.join(index_cards)}</div>
+      <h2>今日の相場メモ</h2>
+      <p>軽量版：チャート画像と銘柄別CSVは生成していません。</p>
+      <div class="market-grid">{''.join(cards)}</div>
       <div class="overview-columns">
-        <div>
-          <h3>最近強いテーマ</h3>
-          <ul>{theme_rows}</ul>
-        </div>
-        <div>
-          <h3>上昇初動・第3波候補</h3>
-          <ul>{early_rows}</ul>
-        </div>
+        <div><h3>最近強いテーマ</h3><ul>{theme_rows}</ul></div>
+        <div><h3>上昇初動・第3波候補</h3><ul>{early_rows}</ul></div>
       </div>
     </section>
     """
 
 
-def render_dashboard(summaries: list[StockSummary], market_moves: list[MarketMove], generated_on: str, chart_date: str) -> str:
+def render_dashboard(summaries: list[StockSummary], market_moves: list[MarketMove], generated_on: str) -> str:
     sorted_items = sorted(summaries, key=lambda item: item.score.total_score, reverse=True)
-    list_names = []
+    list_names: list[str] = []
     for item in summaries:
         for list_name in item.list_name.split("|"):
             list_name = list_name.strip()
             if list_name and list_name not in list_names:
                 list_names.append(list_name)
+
     list_buttons = '<button type="button" class="list-tab active" data-list="all">全部</button>'
     list_buttons += "".join(
         f'<button type="button" class="list-tab" data-list="{html.escape(list_name)}">{html.escape(list_name)}</button>'
         for list_name in list_names
     )
+
     rows = []
     for item in sorted_items:
-        default_chart = item.chart_paths.get("3m") or item.chart_paths.get("latest")
-        chart_data = "".join(
-            f'<span data-chart-code="{html.escape(item.code)}" data-chart-range="{html.escape(label)}" '
-            f'data-chart-src="{html.escape(path)}"></span>'
-            for label, path in item.chart_paths.items()
-            if label in {"1m", "3m", "6m"}
-        )
-        chart = (
-            f'<img class="stock-chart" id="chart-{html.escape(item.code)}" data-code="{html.escape(item.code)}" '
-            f'src="{html.escape(default_chart)}" alt="{html.escape(item.code)} chart">{chart_data}'
-            if default_chart
-            else '<div class="chart-placeholder">チャートなし</div>'
-        )
         score = item.score
-        reasons = score.reasons
-        reason_groups = "".join(
-            [
-                render_reason_group("トレンド", reasons.get("trend", [])),
-                render_reason_group("新高値・ブレイク", reasons.get("breakout", [])),
-                render_reason_group("出来高", reasons.get("volume", [])),
-                render_reason_group("RSI", reasons.get("rsi", [])),
-                render_reason_group("反転初動", reasons.get("reversal", [])),
-                render_reason_group("上昇初動・第3波候補", reasons.get("wave", [])),
-                render_reason_group("リスク減点", reasons.get("risk", [])),
-            ]
-        )
         comments = " / ".join(score.comments)
-        error = f'<p class="error">取得エラー: {html.escape(item.error)}</p>' if item.error else ""
-        detail_metrics = f"""
-              <dl class="metrics">
-                <div><dt>終値</dt><dd>{fmt_number(item.close, 0)}</dd></div>
-                <div><dt>RSI14</dt><dd>{fmt_number(item.rsi, 1)}</dd></div>
-                <div><dt>出来高倍率</dt><dd>{fmt_number(item.volume_ratio, 2)}x</dd></div>
-                <div><dt>52週高値から</dt><dd>{fmt_percent(item.drawdown)}</dd></div>
-                <div><dt>今日の騰落率</dt><dd>{fmt_percent(item.return1d)}</dd></div>
-                <div><dt>5日騰落率</dt><dd>{fmt_percent(item.return5d)}</dd></div>
-                <div><dt>基準日</dt><dd>{html.escape(item.latest_date or "-")}</dd></div>
-                <div><dt>トレンド</dt><dd>{score.trend_score}/20</dd></div>
-                <div><dt>新高値</dt><dd>{score.breakout_score}/20</dd></div>
-                <div><dt>出来高</dt><dd>{score.volume_score}/15</dd></div>
-                <div><dt>RSI</dt><dd>{score.rsi_score}/15</dd></div>
-                <div><dt>反転初動</dt><dd>{score.reversal_score}/25</dd></div>
-                <div><dt>第3波候補</dt><dd>{score.wave_score}/10</dd></div>
-                <div><dt>リスク</dt><dd>{score.risk_penalty}</dd></div>
-              </dl>
-        """
+        error = f"<p class='error'>取得エラー: {html.escape(item.error)}</p>" if item.error else ""
         rows.append(
             f"""
-            <section class="stock {badge_class(item)}"
-              data-list="{html.escape(item.list_name)}"
-              data-total="{score.total_score}"
-              data-reversal="{score.reversal_score}"
-              data-wave="{score.wave_score}"
-              data-breakout="{score.breakout_score}"
-              data-volume="{score.volume_score}"
-              data-risk="{score.risk_penalty}">
-              <div class="stock-head">
-                <div>
-                  <h2>{html.escape(item.name)}</h2>
-                  <p>{html.escape(item.code)} / {html.escape(item.symbol)} / {html.escape(item.list_name)}{(" / " + html.escape(item.memo)) if item.memo else ""}</p>
-                </div>
-                <div class="score {score_class(item)}">{score.total_score}</div>
-              </div>
-              <div class="label-row">
-                <span>{html.escape(score.signal_label)}</span>
-                <span>{html.escape(score.reversal_label)}</span>
-                <span>{html.escape(score.wave_label)}</span>
-                <span class="move-badge {move_class(item.return1d)}">今日 {fmt_percent(item.return1d)}</span>
-              </div>
-              <div class="chart">{chart}</div>
-              <details class="stock-detail">
-                <summary>詳細スコア・根拠</summary>
-                <div class="comment">{html.escape(comments)}</div>
-                {detail_metrics}
-                <div class="reason-groups">{reason_groups}</div>
-              </details>
-              {error}
-            </section>
+            <tr class="stock {score_class(item)}" data-list="{html.escape(item.list_name)}" data-total="{score.total_score}" data-reversal="{score.reversal_score}" data-wave="{score.wave_score}" data-breakout="{score.breakout_score}" data-volume="{score.volume_score}" data-risk="{score.risk_penalty}">
+              <td><strong>{html.escape(item.code)} {html.escape(item.name)}</strong><br><span>{html.escape(item.symbol)} / {html.escape(item.list_name)}{(' / ' + html.escape(item.memo)) if item.memo else ''}</span>{error}</td>
+              <td class="score">{score.total_score}</td>
+              <td>{html.escape(score.signal_label)}<br><span>{html.escape(score.reversal_label)} / {html.escape(score.wave_label)}</span></td>
+              <td>{fmt_number(item.close, 0)}<br><span>{html.escape(item.latest_date or '-')}</span></td>
+              <td class="{move_class(item.return1d)}">{fmt_percent(item.return1d)}<br><span>5日 {fmt_percent(item.return5d)}</span></td>
+              <td>{fmt_number(item.rsi, 1)}<br><span>出来高 {fmt_number(item.volume_ratio, 2)}x</span></td>
+              <td>{score.trend_score}/{score.breakout_score}/{score.volume_score}/{score.rsi_score}<br><span>反転 {score.reversal_score} / 初動 {score.wave_score} / リスク {score.risk_penalty}</span></td>
+              <td>{html.escape(comments)}</td>
+            </tr>
             """
         )
 
@@ -595,357 +375,80 @@ def render_dashboard(summaries: list[StockSummary], market_moves: list[MarketMov
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Investment Watchlist Dashboard</title>
   <style>
-    :root {{
-      --bg: #edf6ff;
-      --text: #17202a;
-      --muted: #65717f;
-      --line: #d8dde3;
-      --panel: #ffffff;
-      --strong: #0b7a53;
-      --watch: #b26b00;
-      --weak: #9c2f2f;
-      --exclude: #6b7280;
-      --accent: #214f7a;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      background:
-        linear-gradient(rgba(242, 248, 255, 0.72), rgba(242, 248, 255, 0.72)),
-        linear-gradient(90deg, rgba(33, 79, 122, 0.045) 1px, transparent 1px),
-        linear-gradient(rgba(33, 79, 122, 0.045) 1px, transparent 1px),
-        var(--bg);
-      background-size: auto, 28px 28px, 28px 28px, auto;
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.5;
-    }}
-    header {{
-      padding: 22px clamp(16px, 4vw, 48px);
-      border-bottom: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.94);
-      backdrop-filter: blur(14px);
-    }}
-    h1 {{ margin: 0; font-size: clamp(24px, 3vw, 34px); letter-spacing: 0; }}
-    header p {{ margin: 6px 0 0; color: var(--muted); }}
-    .toolbar {{
-      position: sticky;
-      top: 0;
-      z-index: 10;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 10px clamp(16px, 4vw, 48px);
-      border-bottom: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.96);
-      backdrop-filter: blur(10px);
-    }}
-    .control-group {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
-    .control-group span {{ color: var(--muted); font-size: 13px; font-weight: 700; }}
-    button {{
-      appearance: none;
-      border: 1px solid var(--line);
-      background: #fff;
-      color: var(--muted);
-      border-radius: 8px;
-      min-width: 52px;
-      height: 34px;
-      padding: 0 10px;
-      font-weight: 700;
-      cursor: pointer;
-    }}
-    button.active {{ background: var(--accent); border-color: var(--accent); color: #fff; }}
-    .market-overview {{
-      margin: 0;
-      padding: 18px clamp(16px, 4vw, 48px);
-      border-bottom: 1px solid var(--line);
-      background: rgba(247, 251, 255, 0.82);
-    }}
-    .overview-head {{
-      display: flex;
-      align-items: end;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 12px;
-    }}
-    .overview-head h2, .overview-columns h3 {{
-      margin: 0;
-      letter-spacing: 0;
-    }}
-    .overview-head h2 {{ font-size: 18px; }}
-    .overview-head p {{
-      margin: 0;
-      color: var(--muted);
-      font-size: 12px;
-      text-align: right;
-    }}
-    .market-grid {{
-      display: grid;
-      grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 8px;
-    }}
-    .market-card {{
-      min-width: 0;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 10px;
-      background: #fff;
-    }}
-    .market-card strong,
-    .market-card span,
-    .market-card em,
-    .market-card small {{
-      display: block;
-      overflow-wrap: anywhere;
-    }}
-    .market-card strong {{ font-size: 13px; }}
-    .market-card span, .market-card small {{ color: var(--muted); font-size: 11px; }}
-    .market-card em {{ font-style: normal; font-weight: 800; margin: 3px 0; }}
-    .market-card.up em {{ color: var(--strong); }}
-    .market-card.down em {{ color: var(--weak); }}
-    .overview-columns {{
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 16px;
-      margin-top: 14px;
-    }}
-    .overview-columns > div {{
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
-      background: #fff;
-    }}
-    .overview-columns h3 {{ font-size: 15px; }}
-    .overview-columns ul {{ padding-left: 0; list-style: none; }}
-    .overview-columns li {{
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      border-top: 1px solid #edf0f2;
-      padding: 8px 0;
-    }}
-    .overview-columns li:first-child {{ border-top: 0; }}
-    .overview-columns li span {{ color: var(--muted); text-align: right; }}
-    main {{
-      display: grid;
-      gap: 16px;
-      padding: 20px clamp(16px, 4vw, 48px) 40px;
-    }}
-    main.grid-1 {{ grid-template-columns: 1fr; }}
-    main.grid-2 {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-    main.grid-4 {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
-    .stock {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-left: 6px solid var(--muted);
-      border-radius: 8px;
-      overflow: hidden;
-      box-shadow: 0 10px 28px rgba(23, 32, 42, 0.08);
-    }}
-    .stock.strong {{ border-left-color: var(--strong); }}
-    .stock.watch {{ border-left-color: var(--watch); }}
-    .stock.weak {{ border-left-color: var(--weak); }}
-    .stock.exclude {{ border-left-color: var(--exclude); }}
-    .stock-head {{
-      display: flex;
-      align-items: start;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 14px 16px 8px;
-    }}
-    h2 {{ margin: 0; font-size: 20px; letter-spacing: 0; }}
-    .stock-head p {{ margin: 4px 0 0; color: var(--muted); font-size: 13px; }}
-    .score {{
-      min-width: 50px;
-      height: 50px;
-      display: grid;
-      place-items: center;
-      border-radius: 8px;
-      background: var(--accent);
-      color: #fff;
-      font-size: 24px;
-      font-weight: 800;
-    }}
-    .score-strong {{ background: #0b7a53; }}
-    .score-good {{ background: #1570a6; }}
-    .score-watch {{ background: #b26b00; }}
-    .score-weak {{ background: #b8492f; }}
-    .score-exclude {{ background: #6b7280; }}
-    .score-muted {{ background: #9ca3af; }}
-    .label-row {{ display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 10px; }}
-    .label-row span {{
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 4px 8px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-    }}
-    .label-row .move-badge.up {{ border-color: rgba(11, 122, 83, 0.28); color: var(--strong); background: rgba(11, 122, 83, 0.08); }}
-    .label-row .move-badge.down {{ border-color: rgba(156, 47, 47, 0.28); color: var(--weak); background: rgba(156, 47, 47, 0.08); }}
-    .label-row .move-badge.flat {{ background: #f8fafc; }}
-    .chart {{ border-top: 1px solid var(--line); background: #fbfbfb; }}
-    .chart img {{ display: block; width: 100%; height: auto; }}
-    .chart-placeholder {{ min-height: 220px; display: grid; place-items: center; color: var(--muted); }}
-    .stock-detail {{
-      border-top: 1px solid var(--line);
-      padding: 0;
-    }}
-    .stock-detail > summary {{
-      cursor: pointer;
-      padding: 11px 16px;
-      font-weight: 800;
-      color: var(--accent);
-      list-style-position: inside;
-    }}
-    .metrics {{
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      margin: 0;
-      padding: 12px 16px 16px;
-      gap: 10px 16px;
-    }}
-    .metrics div {{ min-width: 0; }}
-    dt {{ color: var(--muted); font-size: 12px; }}
-    dd {{ margin: 2px 0 0; font-weight: 650; overflow-wrap: anywhere; }}
-    .comment {{ border-top: 1px solid var(--line); padding: 12px 16px; font-weight: 700; }}
-    .reason-groups {{ border-top: 1px solid var(--line); padding: 10px 16px 16px; }}
-    .reason-groups details {{ border-bottom: 1px solid #edf0f2; padding: 7px 0; }}
-    .reason-groups details:last-child {{ border-bottom: 0; }}
-    .reason-groups summary {{ cursor: pointer; font-weight: 700; font-size: 13px; }}
-    ul {{ margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }}
-    .error {{ margin: 0; padding: 0 16px 16px; color: var(--weak); font-size: 13px; }}
-    @media (max-width: 520px) {{
-      main.grid-1,
-      main.grid-2,
-      main.grid-4 {{ grid-template-columns: 1fr; }}
-      .metrics {{ grid-template-columns: 1fr; }}
-      .toolbar {{ align-items: stretch; }}
-      .control-group {{ width: 100%; }}
-      .overview-head, .overview-columns li {{ display: block; }}
-      .overview-head p, .overview-columns li span {{ text-align: left; }}
-      .market-grid, .overview-columns {{ grid-template-columns: 1fr; }}
-    }}
-    @media (min-width: 521px) and (max-width: 1100px) {{
-      .market-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-    }}
+    :root {{ --bg:#f6f8fa; --panel:#fff; --text:#17202a; --muted:#65717f; --line:#d8dee4; --strong:#0b7a53; --watch:#b26b00; --weak:#9c2f2f; --accent:#214f7a; }}
+    body {{ margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.5; }}
+    header, .toolbar, .market-overview {{ padding:16px clamp(12px,4vw,40px); background:var(--panel); border-bottom:1px solid var(--line); }}
+    h1 {{ margin:0; font-size:26px; }}
+    h2 {{ margin:0 0 6px; font-size:18px; }}
+    h3 {{ margin:0; font-size:15px; }}
+    p, span, small {{ color:var(--muted); }}
+    .toolbar {{ position:sticky; top:0; display:flex; gap:8px; flex-wrap:wrap; z-index:10; }}
+    button {{ border:1px solid var(--line); background:#fff; border-radius:8px; padding:7px 10px; font-weight:700; cursor:pointer; }}
+    button.active {{ background:var(--accent); color:#fff; border-color:var(--accent); }}
+    .market-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; margin:10px 0; }}
+    .market-card {{ border:1px solid var(--line); border-radius:8px; padding:10px; background:#fff; }}
+    .market-card strong, .market-card span, .market-card em, .market-card small {{ display:block; overflow-wrap:anywhere; }}
+    .market-card em {{ font-style:normal; font-weight:800; margin:3px 0; }}
+    .up, .market-card.up em {{ color:var(--strong); }}
+    .down, .market-card.down em {{ color:var(--weak); }}
+    .overview-columns {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }}
+    .overview-columns > div {{ border:1px solid var(--line); border-radius:8px; padding:12px; }}
+    .overview-columns ul {{ list-style:none; padding:0; margin:8px 0 0; }}
+    .overview-columns li {{ display:flex; justify-content:space-between; gap:10px; border-top:1px solid #edf0f2; padding:7px 0; }}
+    main {{ padding:16px clamp(12px,4vw,40px) 40px; }}
+    table {{ width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); font-size:13px; }}
+    th, td {{ border-bottom:1px solid var(--line); padding:9px; text-align:left; vertical-align:top; }}
+    th {{ position:sticky; top:55px; background:#f8fafc; z-index:5; }}
+    tr.strong td:first-child {{ border-left:5px solid var(--strong); }}
+    tr.watch td:first-child {{ border-left:5px solid var(--watch); }}
+    tr.weak td:first-child {{ border-left:5px solid var(--weak); }}
+    tr.exclude td:first-child, tr.muted td:first-child {{ border-left:5px solid var(--muted); }}
+    td.score {{ font-size:22px; font-weight:800; text-align:center; }}
+    .error {{ margin:4px 0 0; color:var(--weak); font-size:12px; }}
+    @media (max-width: 800px) {{ table {{ display:block; overflow-x:auto; white-space:nowrap; }} .overview-columns li {{ display:block; }} }}
   </style>
 </head>
 <body>
   <header>
     <h1>Investment Watchlist Dashboard</h1>
-    <p>Generated: {html.escape(generated_on)} / Chart folder: charts/{html.escape(chart_date)} / スコアは売買推奨ではなく監視優先度です。</p>
+    <p>Generated: {html.escape(generated_on)} / 軽量版：画像・銘柄別CSVなし / スコアは売買推奨ではなく監視優先度です。</p>
   </header>
   {render_market_overview(market_moves, summaries)}
   <nav class="toolbar" aria-label="Dashboard controls">
-    <div class="control-group" aria-label="Watchlist filter">
-      <span>リスト</span>
-      {list_buttons}
-    </div>
-    <div class="control-group" aria-label="Chart range">
-      <span>チャート期間</span>
-      <button type="button" class="range-tab" data-range="1m">1M</button>
-      <button type="button" class="range-tab active" data-range="3m">3M</button>
-      <button type="button" class="range-tab" data-range="6m">6M</button>
-    </div>
-    <div class="control-group" aria-label="Grid columns">
-      <span>列数</span>
-      <button type="button" class="grid-tab" data-grid="grid-1">1</button>
-      <button type="button" class="grid-tab active" data-grid="grid-2">2</button>
-      <button type="button" class="grid-tab" data-grid="grid-4">4</button>
-    </div>
-    <div class="control-group" aria-label="Sort stocks">
-      <span>並び替え</span>
-      <button type="button" class="sort-tab active" data-sort="total" data-order="desc">総合</button>
-      <button type="button" class="sort-tab" data-sort="reversal" data-order="desc">反転</button>
-      <button type="button" class="sort-tab" data-sort="wave" data-order="desc">初動</button>
-      <button type="button" class="sort-tab" data-sort="breakout" data-order="desc">新高値</button>
-      <button type="button" class="sort-tab" data-sort="volume" data-order="desc">出来高</button>
-      <button type="button" class="sort-tab" data-sort="risk" data-order="asc">リスク</button>
-    </div>
+    {list_buttons}
+    <button type="button" class="sort-tab active" data-sort="total" data-order="desc">総合</button>
+    <button type="button" class="sort-tab" data-sort="reversal" data-order="desc">反転</button>
+    <button type="button" class="sort-tab" data-sort="wave" data-order="desc">初動</button>
+    <button type="button" class="sort-tab" data-sort="breakout" data-order="desc">新高値</button>
+    <button type="button" class="sort-tab" data-sort="volume" data-order="desc">出来高</button>
+    <button type="button" class="sort-tab" data-sort="risk" data-order="asc">リスク</button>
   </nav>
-  <main id="stock-list" class="grid-2">
-    {''.join(rows)}
+  <main>
+    <table>
+      <thead><tr><th>銘柄</th><th>点</th><th>判定</th><th>終値</th><th>騰落</th><th>RSI/出来高</th><th>内訳</th><th>コメント</th></tr></thead>
+      <tbody id="stock-list">{''.join(rows)}</tbody>
+    </table>
   </main>
   <script>
-    function visibleAnchorCard() {{
-      const viewportAnchor = window.innerHeight * 0.5;
-      const cards = Array.from(document.querySelectorAll(".stock:not([hidden])"));
-      let best = cards[0] || null;
-      let bestDistance = Number.POSITIVE_INFINITY;
-      cards.forEach((card) => {{
-        const rect = card.getBoundingClientRect();
-        const distance = Math.abs(rect.top + rect.height / 2 - viewportAnchor);
-        if (distance < bestDistance) {{
-          best = card;
-          bestDistance = distance;
-        }}
-      }});
-      if (!best) return null;
-      return {{
-        card: best,
-      }};
-    }}
-
-    function restoreAnchor(anchor) {{
-      if (!anchor || !anchor.card || anchor.card.hidden) return;
-      requestAnimationFrame(() => {{
-        anchor.card.scrollIntoView({{ block: "center", inline: "nearest", behavior: "auto" }});
-      }});
-    }}
-
-    document.querySelectorAll(".range-tab").forEach((button) => {{
-      button.addEventListener("click", () => {{
-        const range = button.dataset.range;
-        document.querySelectorAll(".stock-chart").forEach((image) => {{
-          const source = document.querySelector(`[data-chart-code="${{image.dataset.code}}"][data-chart-range="${{range}}"]`);
-          if (source) image.src = source.dataset.chartSrc;
-        }});
-        document.querySelectorAll(".range-tab").forEach((tab) => tab.classList.toggle("active", tab === button));
-      }});
-    }});
-
     document.querySelectorAll(".list-tab").forEach((button) => {{
       button.addEventListener("click", () => {{
-        const anchor = visibleAnchorCard();
         const listName = button.dataset.list;
-        document.querySelectorAll(".stock").forEach((card) => {{
-          const lists = (card.dataset.list || "").split("|");
-          card.hidden = listName !== "all" && !lists.includes(listName);
+        document.querySelectorAll(".stock").forEach((row) => {{
+          const lists = (row.dataset.list || "").split("|");
+          row.hidden = listName !== "all" && !lists.includes(listName);
         }});
         document.querySelectorAll(".list-tab").forEach((tab) => tab.classList.toggle("active", tab === button));
-        restoreAnchor(anchor);
       }});
     }});
-
-    document.querySelectorAll(".grid-tab").forEach((button) => {{
-      button.addEventListener("click", () => {{
-        const anchor = visibleAnchorCard();
-        const list = document.getElementById("stock-list");
-        list.classList.remove("grid-1", "grid-2", "grid-4");
-        list.classList.add(button.dataset.grid);
-        document.querySelectorAll(".grid-tab").forEach((tab) => tab.classList.toggle("active", tab === button));
-        restoreAnchor(anchor);
-      }});
-    }});
-
     document.querySelectorAll(".sort-tab").forEach((button) => {{
       button.addEventListener("click", () => {{
-        const anchor = visibleAnchorCard();
         const key = button.dataset.sort;
         const order = button.dataset.order === "asc" ? 1 : -1;
         const list = document.getElementById("stock-list");
-        const cards = Array.from(list.querySelectorAll(".stock"));
-        cards.sort((a, b) => {{
-          const av = Number(a.dataset[key] || 0);
-          const bv = Number(b.dataset[key] || 0);
-          return (av - bv) * order;
-        }});
-        cards.forEach((card) => list.appendChild(card));
+        const rows = Array.from(list.querySelectorAll(".stock"));
+        rows.sort((a, b) => (Number(a.dataset[key] || 0) - Number(b.dataset[key] || 0)) * order);
+        rows.forEach((row) => list.appendChild(row));
         document.querySelectorAll(".sort-tab").forEach((tab) => tab.classList.toggle("active", tab === button));
-        restoreAnchor(anchor);
       }});
     }});
   </script>
@@ -1016,13 +519,13 @@ def render_report(summaries: list[StockSummary], market_moves: list[MarketMove],
     volume_ranked = sorted(ok_items, key=lambda item: item.score.volume_score, reverse=True)
     risk_ranked = sorted(ok_items, key=lambda item: item.score.risk_penalty)
     exclude_items = [item for item in total_ranked if item.score.signal_label == "除外候補"]
-
     error_lines = "\n".join(f"- {item.code} {item.name}: {item.error}" for item in errors) if errors else "- なし"
 
     return f"""# 投資ダッシュボード レポート
 
 Generated: {generated_on}
 
+軽量版：チャート画像と銘柄別CSVは生成していません。
 このスコアは売買推奨ではなく、監視優先度を決めるためのスコアです。
 
 ## 今日の相場メモ
@@ -1067,20 +570,21 @@ Generated: {generated_on}
 """
 
 
-def write_outputs(summaries: list[StockSummary], market_moves: list[MarketMove], chart_date: str) -> None:
+def write_outputs(summaries: list[StockSummary], market_moves: list[MarketMove], output_date: str) -> None:
     generated_on = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST")
-    dashboard_html = render_dashboard(summaries, market_moves, generated_on, chart_date)
+    dashboard_html = render_dashboard(summaries, market_moves, generated_on)
     DASHBOARD_PATH.write_text(dashboard_html, encoding="utf-8")
     INDEX_PATH.write_text(dashboard_html, encoding="utf-8")
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    daily_report_dir = REPORTS_DIR / chart_date
+    daily_report_dir = REPORTS_DIR / output_date
     daily_report_dir.mkdir(parents=True, exist_ok=True)
     report = render_report(summaries, market_moves, generated_on)
     REPORT_PATH.write_text(report, encoding="utf-8")
     (REPORTS_DIR / "report.md").write_text(report, encoding="utf-8")
     (daily_report_dir / "report.md").write_text(report, encoding="utf-8")
 
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     score_rows = []
     for item in summaries:
         score_rows.append(
@@ -1116,45 +620,21 @@ def write_outputs(summaries: list[StockSummary], market_moves: list[MarketMove],
     )
 
 
-def copy_latest_charts(output_dir: Path) -> None:
-    latest_dir = CHARTS_DIR / "latest"
-    if latest_dir.exists():
-        shutil.rmtree(latest_dir)
-    shutil.copytree(output_dir, latest_dir)
-
-
-def clean_chart_dir(output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for image_path in output_dir.glob("*.png"):
-        image_path.unlink()
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Update the investment dashboard.")
+    parser = argparse.ArgumentParser(description="Update the lightweight investment dashboard.")
     parser.add_argument("--period", default="18mo", help="yfinance period to download, default: 18mo")
     parser.add_argument("--date", default=date.today().isoformat(), help="output date folder, default: today")
     return parser.parse_args()
 
 
 def main() -> None:
-    configure_fonts()
     args = parse_args()
     watchlist = read_watchlist(WATCHLIST_PATH)
-    output_dir = CHARTS_DIR / args.date
-    clean_chart_dir(output_dir)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    summaries = [
-        summarize_stock(row, output_dir, args.period)
-        for _, row in watchlist.iterrows()
-    ]
+    summaries = [summarize_stock(row, args.period) for _, row in watchlist.iterrows()]
     market_moves = summarize_market()
     write_outputs(summaries, market_moves, args.date)
-    if any(item.chart_paths for item in summaries):
-        copy_latest_charts(output_dir)
-
-    print(f"Updated dashboard: {DASHBOARD_PATH}")
-    print(f"Updated report: {REPORT_PATH}")
+    print(f"Updated lightweight dashboard: {DASHBOARD_PATH}")
+    print(f"Updated lightweight report: {REPORT_PATH}")
 
 
 if __name__ == "__main__":
